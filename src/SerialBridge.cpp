@@ -66,7 +66,8 @@ bool SerialBridge::poll(PIDParams &paramsOut) {
 void SerialBridge::printCurrent(PIDController &pid) {
   float kp, ki, kd;
   pid.getTunings(kp, ki, kd);
-  Serial.printf("PID: %.6f %.6f %.6f\n", kp, ki, kd);
+  Serial.printf("KP: %.6f KI: %.6f KD: %.6f\n", kp, ki, kd);
+
 }
 
 bool SerialBridge::consumeGetPidRequest() {

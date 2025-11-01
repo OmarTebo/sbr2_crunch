@@ -1,4 +1,4 @@
-// src/IMU.cpp  -- replaced Adafruit usage with custom MPU6050 lib; adds robust reinit
+// src/IMU.cpp  -- replaced Adafruit usage with custom MPU6050 lib; adds robust reinit + startup calibration
 #include "IMU.h"
 #include "Config.h"
 #include <Wire.h>
@@ -8,6 +8,10 @@
 #include "MPU6050.h"
 
 static MPU6050 *mpu = nullptr;
+
+// calibration offsets (degrees)
+static float pitchOffset = 0.0f;
+static float rollOffset  = 0.0f;
 
 IMU::IMU() {
   pitch = roll = yaw = 0.0f;
@@ -33,6 +37,24 @@ bool IMU::begin() {
   delay(50);
   lastMillis = millis();
   Serial.println("MPU6050 initialized (custom lib)");
+
+  // quick startup calibration: average a number of samples to compute zero offsets
+  {
+    const int CAL_SAMPLES = 200;
+    const int CAL_DELAY_MS = 5;
+    float sumPitch = 0.0f, sumRoll = 0.0f;
+    for (int i = 0; i < CAL_SAMPLES; ++i) {
+      // allow the lib to update internal filters; pass dt=0.0 for internal handling
+      mpu->update(0.0f);
+      sumPitch += mpu->getPitch();
+      sumRoll  += mpu->getRoll();
+      delay(CAL_DELAY_MS);
+    }
+    pitchOffset = sumPitch / (float)CAL_SAMPLES;
+    rollOffset  = sumRoll  / (float)CAL_SAMPLES;
+    Serial.printf("IMU calibration done: pitchOffset=%.3f rollOffset=%.3f\n", pitchOffset, rollOffset);
+  }
+
   return true;
 }
 
@@ -40,7 +62,7 @@ void IMU::update(float dt) {
   if (!mpu) return;
 
   float oldPitch = pitch;
-  float oldRoll = roll;
+  float oldRoll  = roll;
 
   // delegate to library
   mpu->update(dt);
@@ -48,6 +70,10 @@ void IMU::update(float dt) {
   float newPitch = mpu->getPitch();
   float newRoll  = mpu->getRoll();
   float newYaw   = mpu->getYaw();
+
+  // apply calibration offsets
+  newPitch -= pitchOffset;
+  newRoll  -= rollOffset;
 
   // detect stall / frozen readings: tiny change over a period
   if (fabsf(newPitch - oldPitch) < 1e-5f && fabsf(newRoll - oldRoll) < 1e-5f &&

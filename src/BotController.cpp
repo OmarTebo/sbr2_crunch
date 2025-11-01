@@ -28,10 +28,11 @@ void BotController::begin() {
   }
   ble.begin();
 
-  // default PID values
+  // default PID values (Kp, Ki, Kd)
   pitchPid.begin(1.0f, 0.0f, 0.01f, PID_OUTPUT_MIN_F, PID_OUTPUT_MAX_F);
-  rollMotor.enable(true);
-  pitchMotor.enable(true);
+
+  // keep motors disabled by default in hardware (enable pin behavior depends on wiring)
+  // leave enable state to MotorDriver::begin() default
 }
 
 void BotController::update(float dt) {
@@ -59,15 +60,16 @@ void BotController::update(float dt) {
     _lastTelemetryMs = _nowMs;
     Serial.printf("PITCH:%.2f ROLL:%.2f YAW:%.2f\n", currentPitch, imu.getRoll(), imu.getYaw());
   }
+
   float pitchOut = pitchPid.compute(targetPitch, currentPitch, dt); // out in steps/sec
   float pitchSteps = pitchOut * stepsPerDegree;
-  pitchMotor.setSpeedStepsPerSec(pitchSteps);
-  pitchMotor.runSpeed();
 
-  // roll not used in this simple example (mirror)
-  float currentRoll = imu.getRoll();
-  float rollOut = 0.0f;
-  rollMotor.setSpeedStepsPerSec(rollOut);
+  // drive both wheels from pitch controller. invert one side if wiring needs it.
+  pitchMotor.setSpeedStepsPerSec(pitchSteps);
+  rollMotor.setSpeedStepsPerSec(pitchSteps);
+
+  // non-blocking stepper service
+  pitchMotor.runSpeed();
   rollMotor.runSpeed();
 }
 
@@ -92,5 +94,5 @@ void BotController::applyPendingPid() {
 void BotController::printCurrentPid() {
   float kp, ki, kd;
   pitchPid.getTunings(kp, ki, kd);
-  Serial.printf("PID: %.6f %.6f %.6f\n", kp, ki, kd);
+  Serial.printf("KP: %.6f KI: %.6f KD: %.6f\n", kp, ki, kd);
 }

@@ -3,17 +3,6 @@
 sbr_tuner.py — Minimal PID tuner + telemetry viewer for the self-balancing robot.
 Dependencies: pyserial
   pip install pyserial
-
-Usage:
-  1. Run your ESP32 firmware (it should print lines like: "PITCH:12.34 ROLL:0.12 YAW:-3.40")
-  2. Run: python sbr_tuner.py
-  3. Connect to the correct serial port and baud (115200 default), click Connect.
-  4. Use the PID fields and "Set PID" to send: `SET PID kp ki kd\\n`
-  5. Telemetry updates the numeric readout and a small 2D tilt indicator in realtime.
-
-Notes:
- - Designed to be simple and robust; telemetry parsing is tolerant to extra text.
- - This is a desktop GUI; do NOT run on the ESP32 device.
 """
 
 import threading, queue, time, sys
@@ -38,7 +27,6 @@ class SerialReader(threading.Thread):
     def run(self):
         try:
             print(f"DEBUG: attempting open {self.port}@{self.baud}")
-            # Try pyserial URL/open first (supports socket://, rfc2217://)
             tried = []
             def try_serial_for_url(u):
                 try:
@@ -50,24 +38,19 @@ class SerialReader(threading.Thread):
 
             serobj = None
             if isinstance(self.port, str) and '://' in self.port:
-                # 1) try as-is
                 serobj = try_serial_for_url(self.port)
-                # 2) if rfc2217 failed, try socket:// variant
                 if serobj is None and self.port.startswith('rfc2217://'):
                     alt = 'socket://' + self.port.split('://',1)[1]
                     serobj = try_serial_for_url(alt)
-                # 3) try replacing localhost with 127.0.0.1
                 if serobj is None and 'localhost' in self.port:
                     alt2 = self.port.replace('localhost', '127.0.0.1')
                     serobj = try_serial_for_url(alt2)
-                # 4) try socket://host:port if we can extract host/port
                 if serobj is None:
                     m = re.search(r'://([^:/]+):?([0-9]+)$', self.port)
                     if m:
                         host, portnum = m.group(1), m.group(2)
                         alt3 = f'socket://{host}:{portnum}'
                         serobj = try_serial_for_url(alt3)
-                # 5) last resort: raw TCP socket wrapper
                 if serobj is None:
                     m = re.search(r'://([^:/]+):?([0-9]+)$', self.port)
                     if m:
@@ -93,7 +76,6 @@ class SerialReader(threading.Thread):
                             def is_open(self): return True
                         serobj = SockWrap(s)
             else:
-                # plain COM/tty path
                 try:
                     serobj = serial.Serial(self.port, self.baud, timeout=0.1)
                 except Exception as e:
@@ -134,13 +116,13 @@ class SerialReader(threading.Thread):
         except:
             pass
         self.line_q.put(("__info__", "Serial thread exiting"))
+
     def write_line(self, s):
         if self.ser and self.ser.is_open:
             self.ser.write((s + "\n").encode('utf-8'))
 
 # ---------------------- Simple Telemetry Parser ----------------------
 def parse_telemetry(line):
-    # Looks for tokens like PITCH:12.34 or P:12.34 or pitch=12.34
     out = {}
     try:
         parts = line.replace(',', ' ').split()
@@ -157,14 +139,13 @@ def parse_telemetry(line):
                 fv = float(v)
             except:
                 continue
-            if k.startswith("P") and "PITCH" in k or k == "PITCH":
+            if ("PITCH" in k) or (k == "P"):
                 out['pitch'] = fv
-            elif k.startswith("R") and "ROLL" in k or k == "ROLL":
+            elif ("ROLL" in k) or (k == "R"):
                 out['roll'] = fv
-            elif k.startswith("Y") and "YAW" in k or k == "YAW":
+            elif ("YAW" in k) or (k == "Y"):
                 out['yaw'] = fv
             elif k in ("KP","KI","KD") or k=="PID":
-                # some boards may echo PID values; handle elsewhere
                 out[k.lower()] = fv
     except Exception:
         pass
@@ -178,6 +159,7 @@ class TunerApp:
         self.line_q = queue.Queue()
         self.stop_event = threading.Event()
         self.reader = None
+        self.last_pid = None
 
         # Top frame: connection
         f_conn = ttk.Frame(root, padding=6)
@@ -242,9 +224,13 @@ class TunerApp:
                          (-self.rect_w/2, self.rect_h/2)]
         self.rect_id = None
 
+        # PID log (separate from RX log)
+        self.pid_log = scrolledtext.ScrolledText(root, height=4, state='disabled')
+        self.pid_log.grid(row=3, column=0, sticky="ew", padx=6, pady=(6,0))
+
         # Log window
         self.log = scrolledtext.ScrolledText(root, height=8, state='disabled')
-        self.log.grid(row=3, column=0, sticky="ew", padx=6, pady=6)
+        self.log.grid(row=4, column=0, sticky="ew", padx=6, pady=6)
 
         # Start UI tick
         self.last_pitch = 0.0
@@ -294,14 +280,42 @@ class TunerApp:
             self.btn_conn.config(text="Connect")
 
     def handle_line(self, line):
-        # parse telemetry
+        # parse telemetry and PID values
         parsed = parse_telemetry(line)
+        pid_present = False
+        pid_vals = {}
         if parsed:
-            pitch = parsed.get('pitch', self.last_pitch)
-            roll = parsed.get('roll', self.last_roll)
-            yaw = parsed.get('yaw', None)
-            self.update_telemetry(pitch, roll, yaw)
-        # log everything for debug
+            # telemetry updates
+            if 'pitch' in parsed or 'roll' in parsed or 'yaw' in parsed:
+                pitch = parsed.get('pitch', self.last_pitch)
+                roll = parsed.get('roll', self.last_roll)
+                yaw = parsed.get('yaw', None)
+                self.update_telemetry(pitch, roll, yaw)
+            # capture PID keys if present (kp, ki, kd)
+            for k in ('kp','ki','kd'):
+                if k in parsed:
+                    pid_present = True
+                    pid_vals[k] = parsed[k]
+        # route PID messages to pid_log (separate)
+        if pid_present:
+            kp = pid_vals.get('kp', None)
+            ki = pid_vals.get('ki', None)
+            kd = pid_vals.get('kd', None)
+            msg = f"PID: Kp={kp} Ki={ki} Kd={kd}"
+            try:
+                self.pid_log.config(state='normal')
+                if self.last_pid != (kp,ki,kd):
+                    self.pid_log.insert('end', f"PID CHANGED -> {msg}\n")
+                    self.last_pid = (kp,ki,kd)
+                else:
+                    self.pid_log.insert('end', f"PID ECHO -> {msg}\n")
+                self.pid_log.yview('end')
+                self.pid_log.config(state='disabled')
+            except Exception:
+                pass
+            # also add a short entry in main log for traceability
+            self.log_msg(msg, prefix='PID: ')
+        # always log raw RX for debugging, unchanged
         self.log_msg(line, prefix="RX: ")
 
     def update_telemetry(self, pitch, roll, yaw):
@@ -313,19 +327,16 @@ class TunerApp:
         self.draw_indicator(pitch, roll)
 
     def draw_indicator(self, pitch, roll):
-        # compute rotated rectangle points by roll (degrees)
         cx, cy = self.center
-        theta = math.radians(roll)  # roll rotates around center
+        theta = math.radians(roll)
         cos_t = math.cos(theta); sin_t = math.sin(theta)
         pts = []
         for (x,y) in self.rect_pts:
             rx = x * cos_t - y * sin_t
             ry = x * sin_t + y * cos_t
-            # pitch shifts vertical position slightly (for visual cue)
-            ry += (pitch * 0.6)  # scale
+            ry += (pitch * 0.6)
             pts.append((cx + rx, cy + ry))
         flat = [coord for p in pts for coord in p]
-        # draw
         if self.rect_id is None:
             self.rect_id = self.canvas.create_polygon(flat, fill="", outline="black", width=2)
         else:
@@ -344,7 +355,7 @@ class TunerApp:
             messagebox.showerror("Values", "KP/KI/KD must be numbers")
             return
         line = f"SET PID {kp} {ki} {kd}"
-        if self.reader and self.reader.ser and self.reader.ser.is_open:
+        if self.reader and getattr(self.reader, "ser", None) and getattr(self.reader.ser, "is_open", False):
             self.reader.write_line(line)
             self.log_msg("TX: " + line)
         else:
@@ -352,16 +363,14 @@ class TunerApp:
 
     def send_get_pid(self):
         line = "GET PID"
-        if self.reader and self.reader.ser and self.reader.ser.is_open:
+        if self.reader and getattr(self.reader, "ser", None) and getattr(self.reader.ser, "is_open", False):
             self.reader.write_line(line)
             self.log_msg("TX: " + line)
         else:
             messagebox.showerror("Serial", "Not connected")
 
     def ui_tick(self):
-        # called periodically for UI upkeep; also refresh port list affordance
         if not (self.reader and self.reader.is_alive()):
-            # refresh ports every few seconds when disconnected
             if int(time.time()) % 5 == 0:
                 try:
                     self.port_cb['values'] = self.list_ports()
