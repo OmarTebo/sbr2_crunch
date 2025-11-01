@@ -22,19 +22,8 @@ import serial
 import serial.tools.list_ports
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-
-# --- helper: auto-detect Wokwi RFC2217 port from wokwi.toml if present ---
-def find_wokwi_port(toml_path="wokwi.toml"):
-    try:
-        txt = open(toml_path, "r", encoding="utf-8").read()
-        m = re.search(r"rfc2217ServerPort\s*=\s*(\d+)", txt)
-        if m:
-            return int(m.group(1))
-    except Exception:
-        return None
-    return None
-
-
+import socket
+import re
 
 # ---------------------- Serial Background Reader ----------------------
 class SerialReader(threading.Thread):
@@ -47,25 +36,89 @@ class SerialReader(threading.Thread):
         self.ser = None
 
     def run(self):
-def run(self):
         try:
-            # allow COM paths or pyserial URL schemes (socket://, rfc2217://, etc.)
-            if isinstance(self.port, str) and "://" in self.port:
-                self.ser = serial.serial_for_url(self.port, baudrate=self.baud, timeout=0.1)
+            print(f"DEBUG: attempting open {self.port}@{self.baud}")
+            # Try pyserial URL/open first (supports socket://, rfc2217://)
+            tried = []
+            def try_serial_for_url(u):
+                try:
+                    s = serial.serial_for_url(u, baudrate=self.baud, timeout=0.1)
+                    return s
+                except Exception as e:
+                    tried.append((u, repr(e)))
+                    return None
+
+            serobj = None
+            if isinstance(self.port, str) and '://' in self.port:
+                # 1) try as-is
+                serobj = try_serial_for_url(self.port)
+                # 2) if rfc2217 failed, try socket:// variant
+                if serobj is None and self.port.startswith('rfc2217://'):
+                    alt = 'socket://' + self.port.split('://',1)[1]
+                    serobj = try_serial_for_url(alt)
+                # 3) try replacing localhost with 127.0.0.1
+                if serobj is None and 'localhost' in self.port:
+                    alt2 = self.port.replace('localhost', '127.0.0.1')
+                    serobj = try_serial_for_url(alt2)
+                # 4) try socket://host:port if we can extract host/port
+                if serobj is None:
+                    m = re.search(r'://([^:/]+):?([0-9]+)$', self.port)
+                    if m:
+                        host, portnum = m.group(1), m.group(2)
+                        alt3 = f'socket://{host}:{portnum}'
+                        serobj = try_serial_for_url(alt3)
+                # 5) last resort: raw TCP socket wrapper
+                if serobj is None:
+                    m = re.search(r'://([^:/]+):?([0-9]+)$', self.port)
+                    if m:
+                        host, portnum = m.group(1), int(m.group(2))
+                        s = socket.create_connection((host, portnum), timeout=2.0)
+                        s.settimeout(0.1)
+                        class SockWrap:
+                            def __init__(self, sock): self.sock = sock
+                            def read(self, n=1):
+                                try:
+                                    return self.sock.recv(n)
+                                except socket.timeout:
+                                    return b''
+                            def write(self, b):
+                                try:
+                                    return self.sock.sendall(b)
+                                except:
+                                    return None
+                            def close(self):
+                                try: self.sock.close()
+                                except: pass
+                            @property
+                            def is_open(self): return True
+                        serobj = SockWrap(s)
             else:
-                self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+                # plain COM/tty path
+                try:
+                    serobj = serial.Serial(self.port, self.baud, timeout=0.1)
+                except Exception as e:
+                    tried = [(self.port, repr(e))]
+
+            if serobj is None:
+                emsg = '; '.join(f"{u} -> {err}" for u, err in tried) if tried else 'no attempts'
+                raise OSError(f'Could not open any serial variant. Attempts: {emsg}')
+
+            self.ser = serobj
         except Exception as e:
             self.line_q.put(("__error__", f"Failed open {self.port}@{self.baud}: {e}"))
+            print(f"DEBUG: Failed open {self.port}@{self.baud}: {e}")
             return
+
         self.line_q.put(("__info__", f"Opened {self.port} @ {self.baud}"))
-        buf = b""
+        print(f"DEBUG: Opened {self.port} @ {self.baud}")
+        buf = b''
         while not self.stop_event.is_set():
             try:
                 data = self.ser.read(256)
                 if data:
                     buf += data
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
+                    while b'\n' in buf:
+                        line, buf = buf.split(b'\n', 1)
                         try:
                             text = line.decode('utf-8', errors='ignore').strip()
                         except:
@@ -81,7 +134,6 @@ def run(self):
         except:
             pass
         self.line_q.put(("__info__", "Serial thread exiting"))
-
     def write_line(self, s):
         if self.ser and self.ser.is_open:
             self.ser.write((s + "\n").encode('utf-8'))
@@ -132,21 +184,15 @@ class TunerApp:
         f_conn.grid(row=0, column=0, sticky="ew")
         f_conn.columnconfigure(4, weight=1)
 
-        self.port_var = tk.StringVar()
+        self.port_var = tk.StringVar(value='rfc2217://127.0.0.1:4000')
         self.baud_var = tk.StringVar(value="115200")
         self.kp_var = tk.StringVar(value="0.0")
         self.ki_var = tk.StringVar(value="0.0")
         self.kd_var = tk.StringVar(value="0.0")
 
         ttk.Label(f_conn, text="Port:").grid(row=0, column=0)
-        ports = self.list_ports()
-        wk = find_wokwi_port()
-        if wk:
-            ports.insert(0, f"rfc2217://localhost:{wk}")
-        self.port_cb = ttk.Combobox(f_conn, values=ports, textvariable=self.port_var, width=24)
+        self.port_cb = ttk.Combobox(f_conn, values=self.list_ports(), textvariable=self.port_var, width=18)
         self.port_cb.grid(row=0, column=1)
-        if wk:
-            self.port_var.set(f"rfc2217://localhost:{wk}")
         ttk.Label(f_conn, text="Baud:").grid(row=0, column=2)
         ttk.Entry(f_conn, textvariable=self.baud_var, width=8).grid(row=0, column=3)
         self.btn_conn = ttk.Button(f_conn, text="Connect", command=self.toggle_connect)

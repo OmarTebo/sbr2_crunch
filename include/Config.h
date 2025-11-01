@@ -13,7 +13,7 @@
 #define PID_OUTPUT_MAX_F  1000.0f
 
 // Steps mapping (tune later)
-#define STEPS_PER_DEGREE 10.0f
+#define STEPS_PER_DEGREE (3200.0f/360.0f) // ≈ 8.8888889
 
 // I2C pins (from KiCad nets)
 #define I2C_SDA_PIN 21
