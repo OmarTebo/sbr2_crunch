@@ -1,5 +1,6 @@
 ﻿#include "PIDController.h"
 #include "Config.h"
+#include <cmath>
 
 PIDController::PIDController() {
   kp = ki = kd = 0.0f;
