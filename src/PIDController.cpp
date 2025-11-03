@@ -1,5 +1,6 @@
-#include "PIDController.h"
+﻿#include "PIDController.h"
 #include "Config.h"
+#include <cmath>
 
 PIDController::PIDController() {
   kp = ki = kd = 0.0f;
@@ -10,53 +11,62 @@ PIDController::PIDController() {
 }
 
 void PIDController::begin(float _kp, float _ki, float _kd, float outMin_f, float outMax_f) {
-  kp = _kp; ki = _ki; kd = _kd;
-  outMin = outMin_f; outMax = outMax_f;
+  kp = _kp;
+  ki = _ki; // Ki_per_s (continuous)
+  kd = _kd; // Kd_seconds (continuous)
+  outMin = outMin_f;
+  outMax = outMax_f;
   reset();
 }
 
 void PIDController::setTunings(float _kp, float _ki, float _kd) {
-  kp = _kp; ki = _ki; kd = _kd;
+  kp = _kp;
+  ki = _ki;
+  kd = _kd;
 }
 
 void PIDController::setTuningsContinuous(float Kp, float Ki_per_s, float Kd_seconds, float sampleRateHz) {
-  // Convert continuous to per-sample if required: Ki_per_sample = Ki_per_s / fs; Kd_per_sample = Kd_seconds * fs
-  float Ki_per_sample = Ki_per_s / sampleRateHz;
-  float Kd_per_sample = Kd_seconds * sampleRateHz;
-  // But our compute uses dt explicitly, so store continuous values directly:
+  // keep continuous-time values; compute() is dt-aware
   kp = Kp;
-  ki = Ki_per_s; // keep per-second form; compute() will multiply by dt
-  kd = Kd_seconds; // seconds form; compute divides by dt internally by (err - prev)/dt * kd
+  ki = Ki_per_s;
+  kd = Kd_seconds;
 }
 
 float PIDController::compute(float setpoint, float measurement, float dt_s) {
   if (dt_s <= 0.0f) return 0.0f;
-  float error = setpoint - measurement;
-  // P
+  float error = setpoint - measurement; // degrees
+
+  // P term (deg * unitless kp) -> units: deg * kp (interpreted as deg/s contribution depending on kp units)
   float P = kp * error;
-  // I (continuous Ki_per_s)
+
+  // I term (continuous Ki_per_s): integral accumulates error * dt (deg * s)
   integral += error * dt_s;
-  // anti-windup clamp (based on output range and Ki)
-  float integralLimit = 0;
+  // anti-windup: prevent integral growing beyond what would saturate output
+  float integralLimit = 0.0f;
   if (ki != 0.0f) {
-    // crude bound to avoid runaway; tune as needed
-    integralLimit = fabs(outMax / (ki > 0 ? ki : 1.0f));
-  } else integralLimit = 1e6;
+    // out = ki * integral when I dominates; to keep magnitude bounded, limit integral to outMax/ki
+    integralLimit = fabs(outMax / (ki != 0.0f ? ki : 1.0f));
+  } else {
+    integralLimit = 1e6f;
+  }
   if (integral > integralLimit) integral = integralLimit;
   if (integral < -integralLimit) integral = -integralLimit;
-  float I = ki * integral; // because ki is per-second
+  float I = ki * integral; // units: (1/s) * (deg*s) => deg
 
-  // D
+  // D term: derivative of error (deg/s)
   float d_raw = (error - prevError) / dt_s;
   derivFiltered = d_alpha * d_raw + (1.0f - d_alpha) * derivFiltered;
-  float D = kd * derivFiltered; // kd is seconds (i.e., Kd_cont) -> kd * d(error)/dt
+  float D = kd * derivFiltered; // kd (seconds) * (deg/s) => deg
 
   prevError = error;
 
+  // Sum terms. Because we want output to be angular velocity (deg/s), choose kp/ki/kd accordingly when tuning.
   float out = P + I + D;
+
+  // clamp
   if (out > outMax) out = outMax;
   if (out < outMin) out = outMin;
-  return out;
+  return out; // deg/s
 }
 
 void PIDController::reset() {
@@ -70,3 +80,5 @@ void PIDController::getTunings(float &out_kp, float &out_ki, float &out_kd) {
   out_ki = ki;
   out_kd = kd;
 }
+
+

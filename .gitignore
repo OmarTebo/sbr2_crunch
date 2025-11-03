@@ -3,3 +3,22 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+# Python / caches
+__pycache__/
+*.pyc
+
+# PlatformIO build / logs
+.pio/
+pio-run.log
+
+# Wokwi / temp files
+diagram.json
+wokwi.toml
+
+# local patches / exports
+sbr2_crunch_fixes.patch
+*.patch
+
+# editor files
+.vscode/
+*.swp
