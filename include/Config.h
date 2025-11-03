@@ -10,6 +10,18 @@
 #define PID_OUTPUT_MIN_F -1000.0f
 #define PID_OUTPUT_MAX_F 1000.0f
 
+// PID defaults (used only if no stored values exist)
+#define DEFAULT_PID_KP 1.0f
+#define DEFAULT_PID_KI 0.0f
+#define DEFAULT_PID_KD 1.0f
+
+// NVS namespace and keys
+#define PREFS_NAMESPACE "sbr2"   // NVS namespace
+#define PREFS_KEY_KP   "kp"
+#define PREFS_KEY_KI   "ki"
+#define PREFS_KEY_KD   "kd"
+
+
 // Steps mapping (tune later)
 #define STEPS_PER_DEGREE (3200.0f/360.0f) // ≈ 8.8888889
 

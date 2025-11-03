@@ -24,6 +24,8 @@ public:
   float targetRoll = 0.0f;
 
 private:
+  void loadStoredPid();
+  void savePidToStorage(float kp, float ki, float kd);
   BLEHandler ble;
   portMUX_TYPE mux;
   volatile bool pendingPid;
