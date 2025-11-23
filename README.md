@@ -1,183 +1,87 @@
-# Self-Balancing Robot (SBR) — README
+# Self-Balancing Robot (SBR)
 
-**Purpose:** Firmware for a two-wheeled self-balancing robot running on an ESP32 (ESP-WROOM-32). This README gives new developers the quick start steps, important callouts, and guidance for migrating to a discrete/Tustin PID if desired.
-
----
-
-## Quick start (TL;DR)
-
-### Prerequisites
-- PlatformIO (use the `platformio.ini` environments).
-- VS Code recommended with PlatformIO extension.
-- Python 3 (for tools/pid_gui.py).
-- USB cable and bench power supply for motors. Keep motors disabled while wiring.
-
-### Build & upload
-```bash
-# build and upload (PlatformIO CLI)
-pio run -e <env> -t upload
-
-# open serial monitor (project uses 115200 by default)
-pio device monitor -b 115200
-```
-Replace `<env>` with the environment name in `platformio.ini` (the board variant you use).
-
-### Minimal wiring sanity check
-- ESP32 power: VIN/5V and GND (verify regulator wiring before connecting motor power).
-- IMU (MPU6050): SDA, SCL, VCC, GND. Use pull-ups and keep wiring short.
-- Motor drivers: wire STEP/DIR/ENABLE according to `include/HardwareMap.h`. Keep VMOT disconnected while verifying logic.
-
-### Run & monitor
-- Upload firmware, open serial monitor, watch boot logs for IMU init and PID defaults.
-- Use `SET PID` / `GET PID` via serial (or BLE) for live tuning.
-- `tools/pid_gui.py` can visualize telemetry and change gains — use serial for bulk telemetry.
-
-### Single-source-of-truth
-- `include/Config.h` holds key constants: `CONTROL_LOOP_HZ`, `STEPS_PER_DEGREE`, default PID gains, and hardware pin macros.
+Small, lightweight firmware for a two-wheeled self-balancing robot running on an ESP32,
+using an MPU6050 IMU and A4988-driven stepper motors. The firmware implements a sensor
+wrapper, a PID controller, and a stepper motor driver interface and exposes simple
+serial and BLE interfaces for telemetry and PID tuning.
 
 ---
 
-## Callouts (important — read before editing)
+## Features
 
-### Units & PID semantics (VERY IMPORTANT)
-- **Ki is expressed per second** (`Ki_per_s`).  
-- **Kd is expressed as a time constant in seconds** (`Kd_seconds`).  
-- `PIDController::compute()` expects `dt` in seconds. Always record and communicate the units when sharing gains.
-
-### Historical fixed-point / per-sample gotcha
-- Older branches used fixed-point scaling (scale = **4096**) and per-sample gains. **Do not mix** per-sample and per-second gains — doing so results in incorrect effective gain and possible integer overflow if fixed-point math is reintroduced.
-
-### Do NOT replace the IMU library
-- The project uses a custom MPU6050 library in `lib/MPU6050/` (Kalman/fusion + preprocessing + I²C recovery). This implementation includes behavior and recovery logic that other libraries do not. **Do not replace** it with Adafruit or other off-the-shelf IMU libraries without careful validation.
-
-### STEPS_PER_DEGREE and microstepping
-- `STEPS_PER_DEGREE` is defined in `include/Config.h`. If you change microstepping, gear ratio, or pulleys, update this value and run bench tests to verify mapping.
-
-### I²C robustness & recovery
-- Symptom: IMU stops responding or I²C appears hung. Quick recovery steps:
-  1. Verify wiring and pull-ups.
-  2. Trigger the software I²C reinit path (the MPU driver logs reinit attempts at boot or on error).
-  3. Power-cycle the IMU if software recovery fails.
-- Use strong pull-ups and keep SDA/SCL traces short.
-
-### Motor wiring & safety
-- Check `include/HardwareMap.h` for pin mapping and `LEFT_MOTOR_SIGN` / `RIGHT_MOTOR_SIGN` macros (invert if motors spin the wrong way).
-- **Emergency stop:** the ENABLE pin can be used to disable drivers. Keep a hardware kill switch on the bench as a safety best practice.
-
-### Serial & BLE tuning interfaces
-- Serial CLI supports `SET PID`, `GET PID`, `HELP`. Use serial for verbose telemetry and `tools/pid_gui.py`.
-- BLE mirrors PID writes for remote tuning but is less convenient for logs.
-
-### Persistence & config
-- PID defaults and last-saved gains persist to NVS via `BotController`. To reset, clear NVS or use the provided reset command in Serial CLI (see code for exact command).
-
-### Short debugging checklist
-- Robot leans / oscillates: verify `STEPS_PER_DEGREE`, motor signs, and `CONTROL_LOOP_HZ`.
-- IMU data stuck/hangs: follow I²C recovery steps.
-- Motors jitter: check microstepping, `AccelStepper` configuration, and ensure no blocking delays in the main loop.
-
-### Recommended immediate TODOs (for repo & README)
-- Add explicit `EMERGENCY_STOP` command and hardware kill-switch guidance.
-- Add a bench test to measure/verify `STEPS_PER_DEGREE` (pulse test + recorded degrees).
-- Add clear examples of PID units in Serial/BLE examples.
-- Add a deterministic control-task example using a hardware timer or pinned RTOS task.
+- IMU wrapper around a bundled MPU6050 library with startup calibration and I²C bus recovery.
+- PID controller implemented with continuous-time `Ki_per_s` and `Kd_seconds` semantics. 
+- Motor driver using `AccelStepper` to generate step pulses (non-blocking).
+- BLE and Serial interfaces for remote telemetry and live PID changes.  
+- Fixed-timestep control loop (accumulator/catch-up style) at `CONTROL_LOOP_HZ`.
 
 ---
 
-## Discrete PID (Tustin) — migration guide & TODOs
+## Quick hardware summary
 
-> Short verdict: migrate to a discrete/Tustin PID **only** if you can enforce a stable, low-jitter sample period (e.g., run the PID on a hardware timer or a pinned RTOS task at 200 Hz). Otherwise, keep the existing dt-aware PID or implement an AUTO hybrid.
+- MCU: ESP32 (NodeMCU-32S / `esp32dev` PlatformIO board recommended).
+- IMU: MPU6050 via I²C (SDA/SCL pins configurable in `Config.h`).
+- Motors: Two NEMA steppers driven by A4988 drivers. Use microstepping and set current limits on the driver.
+- Power: Separate motor VMOT and logic 3.3V (common ground).
 
-### Why consider discrete / Tustin
-- **CPU efficiency:** per-tick cost is minimal (few multiplies + adds). Good for ESP32 running IMU, motor drivers, and BT.
-- **Frequency-domain fidelity:** bilinear/Tustin mapping preserves the continuous PID frequency response better than naive Euler conversions when sample time is stable.
-- **Deterministic behavior:** coefficients precomputed for a fixed T yield repeatable controller dynamics.
-
-### Why you might not migrate
-- **Requires a stable sample period.** Jitter invalidates precomputed coefficients and degrades stability.
-- **Anti-windup complexity.** Difference-equation forms can hide the explicit integral state; ensure integrator clamping or back-calculation is provided.
-- **Tooling & unit mismatches.** Keep `Ki_per_s` and `Kd_seconds` semantics and provide conversion adapters — mixing conventions causes bugs.
-
-### Migration checklist (practical)
-1. Add a `PIDInterface` with methods used by `BotController`: `setTunings(kp,ki,kd)`, `setSampleTime_ms(T_ms)`, `compute(setpoint, measurement)`, `setOutputLimits(min,max)`, `reset()`.
-2. Implement `PID_Tustin` that accepts continuous gains `(kp, ki_per_s, kd_seconds)` and computes the Tustin coefficients using the configured `T`.
-3. Enforce a deterministic control task (hardware timer / RTOS task) and measure jitter (mean, max, stddev). Aim for jitter < ±5% of `T`.
-4. Add runtime mode `MODE = {DT_AWARE, DISCRETE_TUSTIN, AUTO}`. In AUTO, switch conservatively based on jitter history.
-5. Preserve anti-windup (clamping or back-calculation) and ensure consistent behavior across mode switches.
-6. Add telemetry/CLI hooks to dump coefficients (b0..b2, a1..a2) and dt stats.
-7. Create bench tests: step response logs for both controllers using identical continuous gains (CSV output).
-8. Document conversion example: continuous gains → T → discrete coefficients for a chosen `CONTROL_LOOP_HZ` (e.g., 200 Hz).
-
-### Debug & acceptance tests
-- Dump coefficients at startup and assert finiteness and expected magnitudes.
-- Run side-by-side step response tests (DT-aware vs DISCRETE) and compare rise time, overshoot, RMSE over 5 s.
-- Monitor loop `dt` across a sliding window and flag instability if `max - mean > 0.05*T`.
-
-### Prioritized TODOs (copy-ready)
-**Short-term**
-- [ ] Add `PIDInterface` and `PID_Tustin` skeleton.
-- [ ] Add CLI dump for coefficients and dt stats.
-- [ ] Add bench test comparing DT-aware vs DISCRETE.
-
-**Mid-term**
-- [ ] Implement shared anti-windup (integrator clamping / back-calculation).
-- [ ] Add runtime AUTO mode with hysteresis for switching.
-- [ ] Add deterministic control-task example.
-
-**Long-term**
-- [ ] Add unit tests and CI regression comparisons.
-- [ ] Add recorded telemetry dataset and a Python replay tool.
+Default pins and constants are in `include/Config.h`.
 
 ---
 
-## Project map (brief file roles)
-- `src/main.cpp` — fixed-timestep loop + startup.
-- `src/BotController.cpp` + `include/BotController.h` — top-level logic, NVS persistence.
-- `src/IMU.cpp` + `lib/MPU6050/` — custom MPU6050 driver, fusion, Kalman, I²C recovery (**do not replace**).
-- `src/PIDController.cpp` + `include/PIDController.h` — current dt-aware PID implementation (units: Ki_per_s, Kd_seconds).
-- `src/MotorDriver.cpp` + `include/MotorDriver.h` — AccelStepper wrapper; sets steps/sec.
-- `src/SerialBridge.cpp` / `src/BLEHandler.cpp` — tuning interfaces.
-- `tools/pid_gui.py` — host-side telemetry/tuning helper.
-- `include/Config.h`, `include/HardwareMap.h` — pins, `STEPS_PER_DEGREE`, `CONTROL_LOOP_HZ`.
+## Quick start (build & run)
+
+Prereqs: PlatformIO (VSCode or CLI), ESP32 USB driver.
+
+1. `git clone https://github.com/OmarTebo/sbr.git`
+2. Open in VSCode (PlatformIO) or use PlatformIO CLI.
+3. Configure any board/pins in `include/Config.h` if needed.
+4. Build and upload using PlatformIO.
+5. Open serial monitor at `SERIAL_BAUD` (default `115200`).
+6. Perform IMU calibration (firmware does a startup calibration; you can re-run via serial commands). 
+
+**Important safety notes**: Keep wheels off the ground during initial tuning and set A4988 current limits before enabling motors.
 
 ---
 
-## Troubleshooting (short)
-- IMU hang: check wiring, trigger software reinit (driver logs), power-cycle sensor.
-- Oscillation: check `STEPS_PER_DEGREE`, motor signs, loop frequency, and PID units.
-- Motor jitter: verify microstepping, AccelStepper settings, and that main loop is non-blocking.
+## Files & structure (high level)
+
+- `include/` – public headers (IMU, PIDController, MotorDriver, BotController, SerialBridge, BLEHandler, Config). 
+- `src/` – implementations: `main.cpp`, module `.cpp` files.
+- `lib/MPU6050/` – bundled MPU6050 driver + fusion/kalman code used by the IMU wrapper.  
+- `tools/pid_gui.py` – PC GUI utility for live PID tuning (serial).  
+- `platformio.ini` – PlatformIO board/flags.
 
 ---
 
-## How to contribute
-- Keep changes small and focused. Preferred workflow:
-  1. Fork → feature branch → PR against `main`.
-  2. Include a short description and test steps in the PR.
-  3. If changing IMU behavior or PID semantics, include bench logs that demonstrate effect.
+## Key runtime behavior
+
+- The `main` loop runs a catch-up fixed-timestep loop and calls into `BotController::update(dt)`. `dt` uses seconds (e.g., 0.005s for 200Hz).
+- IMU returns angles in **degrees** and rates in **degrees/second**. Use those units when tuning PID and mapping to steps.
+- PID compute returns an **angular velocity** (deg/s). The controller converts that to steps/sec using `STEPS_PER_DEGREE`.
 
 ---
 
-## Short TODO checklist (top of README)
-- [ ] Add EMERGENCY_STOP command & docs.
-- [ ] Add `PID_Tustin` module + `PIDInterface`.
-- [ ] Add deterministic control-task example (timer).
-- [ ] Add `STEPS_PER_DEGREE` bench test script and results capture.
-- [ ] Document IMU recovery steps and keep custom MPU6050 lib.
+## PID tuning notes
+
+- Use `Ki = 0` initially. Increase `Kp` until robot responds. Add `Kd` to damp oscillations. `Ki` only for steady-state correction. Example starting gains in code defaults: `Kp = 1.0`, `Ki = 0.0`, `Kd = 1.0` (defaults in `Config.h`).
 
 ---
 
-## Where to look next (quick links)
-- `include/Config.h` — constants & defaults
-- `include/HardwareMap.h` — pin mapping
-- `lib/MPU6050/` — IMU implementation (do NOT replace)
-- `src/PIDController.cpp` — current PID
-- `src/BotController.cpp` — where PID is used
-- `tools/pid_gui.py` — tuning/visualization
+## Telemetry & control
+
+- SerialBridge supports `SET PID <kp> <ki> <kd>` and `GET PID`.  
+- BLE exposes three characteristics for KP/KI/KD, allowing remote writes that are applied safely in the control loop.
 
 ---
 
-If you'd like, I can:
-- write the `PIDInterface` + `PID_Tustin` skeleton files next, ready to compile, or  
-- create the bench test script (`/tools/tests/`) that logs CSV telemetry for side-by-side comparison.
+## Contributing
 
-Which should I do next?
+- Keep public headers small and document units (degrees, deg/s, dt seconds).
+- Put algorithm-heavy code in `.cpp` and keep `#include` minimal.
+- Add unit tests for PID math and any filter code in `lib/MPU6050`.
+
+---
+
+## References / source files used
+
+- `include/Config.h`, `include/IMU.h`, `include/PIDController.h`, `include/MotorDriver.h`, `include/BotController.h`, `include/SerialBridge.h` and their implementations in `src/`. (See repository for full sources).
